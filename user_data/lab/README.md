@@ -3,8 +3,8 @@
 Objetivo: usar o Freqtrade como **laboratório** para descobrir se existe uma estratégia com edge
 estatisticamente robusto, antes de colocar qualquer dinheiro real.
 
-**Estado atual: nenhuma estratégia aprovada.** Três experimentos rodaram e os três foram
-reprovados com evidência (ver [Registro de experimentos](#registro-de-experimentos)). O que está
+**Estado atual: nenhuma estratégia aprovada.** Quatro experimentos rodaram; o quarto achou um
+sinal real, mas abaixo do custo. Todos reprovados com evidência (ver [Registro de experimentos](#registro-de-experimentos)). O que está
 pronto e vale reaproveitar é o *método*, não o alfa.
 
 ## Ordem certa de trabalho
@@ -30,6 +30,7 @@ entrada sem sinal só encontra parâmetros que fazem o treino brilhar e morrem e
 | Arquivo | O que é |
 |---|---|
 | `probe_entry.py` | Triagem de premissas de entrada em pandas puro. Mede o retorno forward depois do sinal, líquido de taxa, nos 4 períodos. Dezenas de variantes em segundos. |
+| `probe_xsec.py` | Triagem **cross-sectional**: ranqueia os pares pelo retorno passado e mede o spread top-k − bottom-k. O beta de mercado se cancela por construção. |
 | `../strategies/TRM_RawEntry.py` | Mede o edge bruto de uma entrada dentro do Freqtrade: sem stop, sem parcial, sem trailing, saída só por tempo. Passo de confirmação do `probe_entry.py`. |
 | `../strategies/TrendRegimeMomentum.py` | **Experimento 1, reprovado.** Mantido como registro: regime BTC 4h + breakout 30m. |
 | `../hyperopts/RobustEdgeHyperOptLoss.py` | Loss de Hyperopt que premia Profit Factor e penaliza drawdown e poucos trades. |
@@ -163,6 +164,41 @@ Isso fecha a questão de escala de tempo: **o problema é a premissa, não o tim
 breakout nem reversão à média em indicadores de preço, em nenhuma escala de 30m a 1d, mostram
 expectativa positiva estável fora da amostra neste universo.
 
+### Experimento 4 — Momentum cross-sectional (`probe_xsec.py`) — ❌ REPROVADO, mas com sinal
+
+Muda a pergunta de "este par sobe?" para "qual dos 10 sobe mais que os outros?". A cada
+rebalance ranqueia os pares pelo retorno dos últimos L candles e mede o retorno forward de H
+candles do top-k menos o do bottom-k (`spread`). O beta de mercado entra igual nas duas pernas
+e se cancela — é o contaminante que dominou o experimento 3. Rebalances não se sobrepõem.
+
+**É a primeira premissa do lab com sinal consistente nos quatro períodos.** Momentum de 1 dia
+(L=1, H=1, 1d):
+
+```
+                     train        valid        oos          fwd
+spread  k=2          +0.17        +0.27        +0.14        +0.26   (t: 1.5 / 1.4 / 1.0 / 2.3)
+spread  k=3          +0.11        +0.15        +0.15        +0.20   (t: 1.2 / 1.0 / 1.3 / 2.1)
+spread  k=2, em 4h   +0.17        +0.20        +0.26        +0.01
+excesso k=2          +0.03        +0.16        +0.04        +0.13   (top-2 menos a média do universo)
+long    k=2          -0.15        +0.26        -0.20        -0.15   (top-2 líquido de 0,2% de taxa)
+```
+
+Três leituras:
+
+1. **O sinal existe.** Positivo em 4/4 períodos com k=2 e k=3, 3/4 em 4h, e sobrevive a
+   diferentes k. Nada antes chegou perto disso.
+2. **Está do lado errado para spot.** Decompondo o spread: o top-2 rende só +0,03 a +0,16 pp/dia
+   acima do universo, mas o bottom-2 rende **−0,10 a −0,14 pp/dia abaixo**, em todos os
+   períodos. Dois terços do efeito é "os piores de ontem continuam piores". Isso só se monetiza
+   vendendo, e em spot long-only vira no máximo um filtro de exclusão de pairlist — que só vale
+   alguma coisa em cima de uma entrada que ainda não existe.
+3. **Não paga o custo.** Rebalance diário custa 0,2 pp/dia contra um excesso de 0,03-0,16. A
+   perna comprada é negativa líquida em 3 de 4 períodos. Rebalancear menos (H=3, H=7) para
+   diluir a taxa mata o sinal: em `oos` o spread vira negativo. O efeito é genuinamente de 1 dia.
+
+Lookbacks longos (30-60d) invertem em 2026 (t de −2,2 a −2,6 em `fwd`): o momentum de médio
+prazo virou reversão este ano. Instável demais para construir em cima.
+
 ## Problemas metodológicos a corrigir no próximo experimento
 
 - **Viés de sobrevivência**: a whitelist são 10 moedas escolhidas por terem sobrevivido até 2026.
@@ -175,21 +211,23 @@ expectativa positiva estável fora da amostra neste universo.
 
 ## O que a evidência sugere tentar em seguida
 
-Três experimentos fecham a família inteira de "indicador de preço em um par, long-only": breakout
-e reversão, de 30m a 1d, com e sem filtro de regime. Em nenhuma combinação existe expectativa
-positiva estável fora da amostra. Continuar nessa família é procurar o 14º indicador.
+Quatro experimentos fecham o que dá para extrair de **preço** neste universo (10 majors, spot,
+long-only, taxa de varejo): time-series não tem sinal em escala nenhuma; cross-sectional tem um
+sinal real de ~0,15 pp/dia que fica majoritariamente no lado vendido e não cobre 0,2 pp de taxa.
 
-O que resta são premissas de natureza diferente:
+A conclusão honesta do lab até aqui: **não existe edge de preço operável em spot long-only com
+taxa de 0,2% neste universo.** Isso não é fracasso do método — é o resultado que o método
+existe para produzir antes de dinheiro real entrar.
 
-1. **Prêmio estrutural em vez de direcional.** Funding rate em perpétuos, basis spot-futuro,
-   carry: edge que não depende de prever direção e não compete com todo mundo olhando o mesmo
-   RSI. Exige dados de futuros (o `download-data` do Freqtrade baixa funding com
-   `--trading-mode futures`).
-2. **Cross-sectional em vez de time-series.** Em vez de "este par vai subir?", "qual dos 10 vai
-   subir mais que os outros?" — força relativa, rotação. Neutraliza o beta de mercado que
-   domina as tabelas de 4h/1d, e é o que o experimento 3 mostrou ser o grande contaminante.
-3. **Só depois**: FreqAI. Um modelo em cima de features cujo edge bruto individual é negativo
-   aprende ruído mais rápido, não menos.
+O que ainda muda a equação, em ordem de custo:
+
+1. **Futuros em vez de spot.** Destrava o lado vendido do experimento 4 (o spread completo de
+   +0,15-0,27 pp/dia, não só o terço comprado), e abre o **funding rate** como prêmio estrutural.
+   `download-data --trading-mode futures` baixa candles e funding. Muda risco e complexidade de
+   forma real — é uma decisão sua, não do lab.
+2. **Custo menor.** Ordens maker com desconto BNB chegam a ~0,15 pp ida e volta; não fecha a
+   conta sozinho, mas muda o limiar de todos os probes.
+3. **FreqAI só depois** de um dos dois anteriores mostrar excesso positivo líquido.
 
 ## Passo a passo
 
@@ -202,7 +240,8 @@ pip install -r requirements.txt -r requirements-hyperopt.txt -e .
 user_data/lab/01_download_data.sh
 
 # 2. triagem da premissa de entrada  <-- comece SEMPRE aqui
-.venv/bin/python user_data/lab/probe_entry.py
+.venv/bin/python user_data/lab/probe_entry.py            # time-series: "este par sobe?"
+.venv/bin/python user_data/lab/probe_xsec.py --tf 1d     # cross-sectional: "qual sobe mais?"
 
 # 3. confirmação no Freqtrade (só se o passo 2 passar nos 4 períodos)
 freqtrade backtesting --config user_data/lab/config_lab.json --userdir user_data \
