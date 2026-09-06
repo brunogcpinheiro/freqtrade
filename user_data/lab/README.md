@@ -3,9 +3,8 @@
 Objetivo: usar o Freqtrade como **laboratório** para descobrir se existe uma estratégia com edge
 estatisticamente robusto, antes de colocar qualquer dinheiro real.
 
-**Estado atual: nenhuma estratégia aprovada.** Cinco experimentos rodaram; o quinto (long-short em
-futuros) é o primeiro com retorno líquido positivo em todos os anos — e ainda assim inoperável
-como está. Todos com evidência (ver [Registro de experimentos](#registro-de-experimentos)). O que está
+**Estado atual: nenhuma estratégia aprovada.** Seis experimentos rodaram. O quinto parecia ter
+sinal; o sexto mostrou que era artefato do universo pequeno. Todos com evidência (ver [Registro de experimentos](#registro-de-experimentos)). O que está
 pronto e vale reaproveitar é o *método*, não o alfa.
 
 ## Ordem certa de trabalho
@@ -32,6 +31,7 @@ entrada sem sinal só encontra parâmetros que fazem o treino brilhar e morrem e
 |---|---|
 | `probe_entry.py` | Triagem de premissas de entrada em pandas puro. Mede o retorno forward depois do sinal, líquido de taxa, nos 4 períodos. Dezenas de variantes em segundos. |
 | `probe_xsec.py` | Triagem **cross-sectional**: ranqueia os pares pelo retorno passado e mede o spread top-k − bottom-k. O beta de mercado se cancela por construção. |
+| `universe_perps_pre2022.txt` | 60 perpétuos USDT-M cripto listados antes de 2022, ordenados por volume atual. Universo do experimento 6. |
 | `../strategies/TRM_RawEntry.py` | Mede o edge bruto de uma entrada dentro do Freqtrade: sem stop, sem parcial, sem trailing, saída só por tempo. Passo de confirmação do `probe_entry.py`. |
 | `../strategies/TrendRegimeMomentum.py` | **Experimento 1, reprovado.** Mantido como registro: regime BTC 4h + breakout 30m. |
 | `../hyperopts/RobustEdgeHyperOptLoss.py` | Loss de Hyperopt que premia Profit Factor e penaliza drawdown e poucos trades. |
@@ -245,6 +245,35 @@ A causa dos itens 1 e 2 é a mesma: **k=2 de 10 é um spread de 4 nomes.** Um de
 resultado do dia. Estratégias cross-sectional tiram o sharpe da diversificação — 20 nomes por
 perna, não 2 — e isso é a próxima coisa a testar, não um indicador novo.
 
+### Experimento 6 — Long-short em 61 perpétuos — ❌ REPROVADO (e reprova o 5)
+
+Hipótese do experimento 5: k=2 de 10 é um spread de 4 nomes; com 60 nomes e k=8-10 a média se
+mantém e o desvio cai. Universo: os 60 perps cripto USDT-M listados antes de 2022 mais líquidos
+hoje (`universe_perps_pre2022.txt`), com e sem seleção ponto-a-ponto dos 40/20 mais líquidos
+nos 30 dias anteriores. 18 configurações, L=1, H=1.
+
+```
+config              train        valid        oos          fwd     | sharpe  maxDD%  anos+
+top-all k=5  maker  -0.05        +0.05        +0.14        +0.18   |  0.23   -76.4   3/5
+top-all k=10 maker  -0.13        -0.02        -0.03        +0.22   | -0.29   -83.3   1/5
+top-40  k=8  maker  -0.12        -0.12        -0.05        +0.22   | -0.43   -90.8   1/5
+top-20  k=10 maker  -0.11        -0.03        -0.08        +0.14   | -0.52   -79.3   1/5
+(taker: tudo pior; 17 das 18 configurações com sharpe negativo)
+```
+
+**A média não se manteve — inverteu.** Em 60 altcoins o efeito bruto de 1 dia é de *reversão*
+(≈ −0,13 pp/dia para momentum no train, t até −2,8), o oposto dos 10 majors, e em 2026 vira
+momentum de novo. Quando o sinal de um efeito troca entre sub-universos e entre anos, não é edge
+com o sinal errado — é ruído. Nem momentum nem reversão pagam a taxa de forma estável em
+nenhum recorte.
+
+Leitura retroativa do experimento 5: 5/5 anos positivos com k=2 em 10 nomes, pooled t=1,5,
+depois de dezenas de variantes testadas nos experimentos 4-5, era exatamente o que um falso
+positivo por teste múltiplo parece. O experimento 6 foi o teste de robustez que ele precisava e
+não passou.
+
+Isso fecha **cross-sectional em preço**, spot ou futuros.
+
 ## Problemas metodológicos a corrigir no próximo experimento
 
 - **Viés de sobrevivência**: a whitelist são 10 moedas escolhidas por terem sobrevivido até 2026.
@@ -265,18 +294,16 @@ A conclusão honesta do lab até aqui: **não existe edge de preço operável em
 taxa de 0,2% neste universo.** Isso não é fracasso do método — é o resultado que o método
 existe para produzir antes de dinheiro real entrar.
 
-O experimento 5 mostrou que futuros destravam o sinal, mas que com 10 pares ele é um spread de
-4 nomes com cauda de −30% num dia. O que muda a equação agora:
+Seis experimentos fecham tudo que é **previsão de preço** neste lab: time-series (breakout,
+reversão, 30m a 1d) e cross-sectional (momentum/reversão de 1 a 60 dias, 10 a 60 nomes, spot e
+futuros). Nada tem expectativa positiva estável fora da amostra depois de custos.
 
-1. **Universo maior.** Top 40-60 perpétuos por volume, k=8-10 por perna. Se o efeito de 1 dia
-   é universal, a média se mantém e o desvio cai com a raiz do número de nomes — é de onde vem o
-   sharpe de qualquer estratégia cross-sectional. Testável em minutos com os mesmos probes.
-   Caveat: mesmo top-60 de hoje exclui as delistadas; o lado vendido continua enviesado.
-2. **Só se (1) der sharpe > 1,5 com maxDD < 30%:** estratégia Freqtrade em futuros
-   (`can_short=True`, `margin_mode=isolated`, ordens limite) e **dry-run para medir a taxa de
-   fill maker** — que é a variável de que o edge depende, e a única coisa que paper trading mede
-   melhor que backtest.
-3. **FreqAI** continua depois de tudo isso.
+O que resta é de natureza diferente — retorno que **não vem de acertar direção**:
+
+1. **Carry de funding** (cash-and-carry): short no perpétuo + long no spot do mesmo ativo,
+   delta-neutro. O retorno é a taxa de funding recebida pelo short, não o preço. Risco é de
+   execução, basis e contraparte, não de direção. `probe_carry.py` mede isso.
+2. **FreqAI** só se algum sinal bruto for positivo antes — nada até aqui foi.
 
 ## Passo a passo
 
@@ -292,6 +319,7 @@ user_data/lab/01_download_data.sh
 .venv/bin/python user_data/lab/probe_entry.py            # time-series: "este par sobe?"
 .venv/bin/python user_data/lab/probe_xsec.py --tf 1d     # cross-sectional: "qual sobe mais?"
 .venv/bin/python user_data/lab/probe_xsec.py --futures --k 2 --fee 0.0002   # long-short em perpétuos
+.venv/bin/python user_data/lab/probe_xsec.py --futures --k 8 --fee 0.0002 --universe user_data/lab/universe_perps_pre2022.txt --top 40
 
 # 3. confirmação no Freqtrade (só se o passo 2 passar nos 4 períodos)
 freqtrade backtesting --config user_data/lab/config_lab.json --userdir user_data \

@@ -22,7 +22,13 @@ Modo --futures (só 1d): long-short de verdade em perpétuos USDT-M.
   - funding: a perna comprada paga a taxa, a vendida recebe (soma das 3 cobranças diárias)
   - net = spread bruto - taxas - funding líquido
 
+Universo (--futures): default são os 10 pares do lab. --universe arquivo.txt (um par por
+linha, formato BTC/USDT:USDT) usa todos os que tiverem dados; --top N seleciona a cada
+rebalance os N de maior volume em USDT nos 30 dias ANTERIORES (ponto-a-ponto, sem olhar o
+futuro). Nada disso remove o viés de sobrevivência: só existem os pares vivos hoje.
+
 Uso: python user_data/lab/probe_xsec.py [--tf 1d|4h] [--k 2] [--futures] [--fee 0.0005]
+                                        [--universe lista.txt] [--top 40]
 """
 
 import argparse
@@ -48,20 +54,26 @@ def panel(tf: str, col: str) -> pd.DataFrame:
 
 
 FUT = pathlib.Path(__file__).resolve().parents[1] / "data" / "binance" / "futures"
+UNIVERSE: list[str] = list(PAIRS)  # símbolos base (BTC, ETH...); sobrescrito por --universe
+TOP_N: int | None = None  # --top: seleção ponto-a-ponto por volume dos 30d anteriores
 
 
 def fut_panel(tf: str, col: str) -> pd.DataFrame:
-    return pd.DataFrame(
-        {p: pd.read_feather(FUT / f"{p}_USDT_USDT-{tf}-futures.feather").set_index("date")[col] for p in PAIRS}
-    ).sort_index()
+    cols = {}
+    for p in UNIVERSE:
+        f = FUT / f"{p}_USDT_USDT-{tf}-futures.feather"
+        if f.exists():
+            cols[p] = pd.read_feather(f).set_index("date")[col]
+    return pd.DataFrame(cols).sort_index()
 
 
 def funding_daily() -> pd.DataFrame:
     """Funding pago por dia (soma das cobranças de 8h). Positivo = long paga, short recebe."""
     cols = {}
-    for p in PAIRS:
-        f = pd.read_feather(FUT / f"{p}_USDT_USDT-1h-funding_rate.feather").set_index("date")["funding_rate"]
-        cols[p] = f.resample("1D").sum()
+    for p in UNIVERSE:
+        f = FUT / f"{p}_USDT_USDT-1h-funding_rate.feather"
+        if f.exists():
+            cols[p] = pd.read_feather(f).set_index("date")["funding_rate"].resample("1D").sum()
     return pd.DataFrame(cols).sort_index()
 
 
@@ -73,10 +85,15 @@ def spread_series(k: int, fee_side: float, L: int, start: str, end: str) -> pd.D
     past = close / close.shift(L) - 1
     fwd = opn.shift(-2) / opn.shift(-1) - 1
     # funding pago durante o dia t+1 (a posição é carregada de open t+1 a open t+2)
-    fund_next = funding_daily().reindex(past.index).shift(-1)
+    fund_next = funding_daily().reindex(past.index).shift(-1).reindex(columns=past.columns)
+    # volume em USDT dos 30 dias ANTERIORES (shift(1): não inclui o dia do rebalance)
+    dvol = (fut_panel("1d", "volume") * close).rolling(30, min_periods=20).mean().shift(1)
     rows, prev_top, prev_bot = [], set(), set()
     for t in past.index[(past.index >= start) & (past.index < end)]:
         rp = past.loc[t].dropna()
+        if TOP_N:
+            liquid = dvol.loc[t].reindex(rp.index).dropna().nlargest(TOP_N).index
+            rp = rp.reindex(liquid)
         rf = fwd.loc[t].reindex(rp.index).dropna()
         rp = rp.reindex(rf.index)
         if len(rp) < MIN_PAIRS:
@@ -168,7 +185,12 @@ if __name__ == "__main__":
     ap.add_argument("--k", type=int, default=2)
     ap.add_argument("--futures", action="store_true", help="long-short em perpétuos (só 1d)")
     ap.add_argument("--fee", type=float, default=0.0005, help="taxa de futuros por lado")
+    ap.add_argument("--universe", help="arquivo com um par por linha (BTC/USDT:USDT)")
+    ap.add_argument("--top", type=int, help="N mais líquidos nos 30d anteriores, a cada rebalance")
     a = ap.parse_args()
+    if a.universe:
+        UNIVERSE = [ln.strip().split("/")[0] for ln in open(a.universe) if ln.strip()]
+    TOP_N = a.top
     if a.futures:
         run_futures(a.k, a.fee)
     else:
