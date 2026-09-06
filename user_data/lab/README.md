@@ -3,8 +3,9 @@
 Objetivo: usar o Freqtrade como **laboratório** para descobrir se existe uma estratégia com edge
 estatisticamente robusto, antes de colocar qualquer dinheiro real.
 
-**Estado atual: nenhuma estratégia aprovada.** Seis experimentos rodaram. O quinto parecia ter
-sinal; o sexto mostrou que era artefato do universo pequeno. Todos com evidência (ver [Registro de experimentos](#registro-de-experimentos)). O que está
+**Estado atual: nenhuma estratégia aprovada, e o lab chegou a uma conclusão.** Sete experimentos
+cobrem previsão de preço (time-series e cross-sectional, spot e futuros, 30m a 1d) e prêmio
+estrutural (funding). Nada é operável com taxa de varejo. Todos com evidência (ver [Registro de experimentos](#registro-de-experimentos)). O que está
 pronto e vale reaproveitar é o *método*, não o alfa.
 
 ## Ordem certa de trabalho
@@ -31,6 +32,7 @@ entrada sem sinal só encontra parâmetros que fazem o treino brilhar e morrem e
 |---|---|
 | `probe_entry.py` | Triagem de premissas de entrada em pandas puro. Mede o retorno forward depois do sinal, líquido de taxa, nos 4 períodos. Dezenas de variantes em segundos. |
 | `probe_xsec.py` | Triagem **cross-sectional**: ranqueia os pares pelo retorno passado e mede o spread top-k − bottom-k. O beta de mercado se cancela por construção. |
+| `probe_carry.py` | Carry de funding (short perp + long spot, delta-neutro). Retorno = funding recebido − taxas de rebalance. |
 | `universe_perps_pre2022.txt` | 60 perpétuos USDT-M cripto listados antes de 2022, ordenados por volume atual. Universo do experimento 6. |
 | `../strategies/TRM_RawEntry.py` | Mede o edge bruto de uma entrada dentro do Freqtrade: sem stop, sem parcial, sem trailing, saída só por tempo. Passo de confirmação do `probe_entry.py`. |
 | `../strategies/TrendRegimeMomentum.py` | **Experimento 1, reprovado.** Mantido como registro: regime BTC 4h + breakout 30m. |
@@ -274,6 +276,57 @@ não passou.
 
 Isso fecha **cross-sectional em preço**, spot ou futuros.
 
+### Experimento 7 — Carry de funding, cash-and-carry (`probe_carry.py`) — ❌ REAL, MAS PEQUENO DEMAIS
+
+Única premissa do lab que não prevê direção: short no perpétuo + long no spot, retorno = funding
+recebido. Hedge perfeito assumido (basis diário na Binance tem média ~0), taxa de 0,30% por
+nome trocado (spot + perp, ida e volta), funding negativo *está* nos dados.
+
+```
+                              train     valid     oos       fwd    | anual%  maxDD%  anos+
+10 majors, todos, hold 7d    +0.001    +0.030    +0.007    +0.003  |   3.4    -5.9    4/5
+61 perps, todos, hold 7d     +0.000    +0.032    +0.001   -0.024   |   1.5    -7.3    3/5
+61 perps, top-3 fund, 7d     -0.036    -0.007    -0.035   -0.010   |  -7.7   -30.7    0/5
+61 perps, top-3 fund, 30d    -0.004    +0.031    -0.002   +0.016   |   3.3    -6.3    4/5
+(pp/dia do notional de uma perna)
+```
+
+O prêmio existe e tem o perfil esperado: positivo em 4 de 5 anos, drawdown de um dígito, e
+**só paga de verdade em mercado de alta** (2024: +0,03 pp/dia ≈ 11%/ano; 2022 e 2025-26: ≈ 0).
+Rebalancear semanalmente atrás do funding mais alto perde para a taxa; a cada 30 dias volta a
+~3%/ano. Como o short exige margem, o capital empregado é ~1,5× o notional: **≈ 2-7%/ano no
+capital**, dependendo do ano. É menos do que USDT rende em lending, com risco de exchange em cima.
+
+Não é um bot. É uma linha de rendimento passivo que já foi arbitrada até o custo de capital.
+
+## Conclusão do lab (2026-09)
+
+Sete experimentos, um universo de 10 majors + 60 altcoins, 2022 → hoje, sempre com o mesmo
+protocolo (train / valid / oos / fwd, parâmetros congelados, custos reais):
+
+| # | Premissa | Resultado |
+|---|---|---|
+| 1 | Breakout + regime BTC, 30m | Sem sinal; entrada pior que aleatória |
+| 2 | Reversão à média, 30m | Sinal real (+0,1-0,3 pp), abaixo da taxa, decaindo |
+| 3 | Os mesmos em 4h e 1d | Não escala; o que parece sinal é beta de mercado |
+| 4 | Momentum cross-sectional, spot | Sinal em 4/4 períodos, mas no lado vendido e abaixo da taxa |
+| 5 | Long-short em perpétuos, 10 majors | Positivo 5/5 anos com maker, sharpe 0,7, maxDD −65% |
+| 6 | O mesmo em 61 perps | Inverte o sinal; reprova o 5 como artefato de universo |
+| 7 | Carry de funding | Real, 2-7%/ano no capital |
+
+**Não existe, neste universo e com taxa de varejo, uma estratégia de preço com expectativa
+positiva estável fora da amostra.** O único retorno estrutural mensurável (funding) rende menos
+que renda fixa em stablecoin. Isso é o resultado do método funcionando, não falhando: ele
+existia para impedir que dinheiro real entrasse numa dessas sete coisas — e impediu.
+
+O que mudaria a conclusão, em ordem de plausibilidade: (a) custo de execução de market maker
+(≤ 0,01%), que transforma os experimentos 2 e 5 — mas isso é infraestrutura, não estratégia;
+(b) dados que ninguém mais tem (fluxo, order book, on-chain) — o lab só olhou preço e funding;
+(c) FreqAI em cima de (b), nunca em cima de preço puro.
+
+**Paper trading não entra nessa lista.** Dry-run mede execução, não edge; sem uma estratégia com
+expectativa positiva, ele só mostra ruído mais devagar.
+
 ## Problemas metodológicos a corrigir no próximo experimento
 
 - **Viés de sobrevivência**: a whitelist são 10 moedas escolhidas por terem sobrevivido até 2026.
@@ -298,12 +351,7 @@ Seis experimentos fecham tudo que é **previsão de preço** neste lab: time-ser
 reversão, 30m a 1d) e cross-sectional (momentum/reversão de 1 a 60 dias, 10 a 60 nomes, spot e
 futuros). Nada tem expectativa positiva estável fora da amostra depois de custos.
 
-O que resta é de natureza diferente — retorno que **não vem de acertar direção**:
-
-1. **Carry de funding** (cash-and-carry): short no perpétuo + long no spot do mesmo ativo,
-   delta-neutro. O retorno é a taxa de funding recebida pelo short, não o preço. Risco é de
-   execução, basis e contraparte, não de direção. `probe_carry.py` mede isso.
-2. **FreqAI** só se algum sinal bruto for positivo antes — nada até aqui foi.
+Ver [Conclusão do lab](#conclusão-do-lab-2026-09).
 
 ## Passo a passo
 
@@ -320,6 +368,7 @@ user_data/lab/01_download_data.sh
 .venv/bin/python user_data/lab/probe_xsec.py --tf 1d     # cross-sectional: "qual sobe mais?"
 .venv/bin/python user_data/lab/probe_xsec.py --futures --k 2 --fee 0.0002   # long-short em perpétuos
 .venv/bin/python user_data/lab/probe_xsec.py --futures --k 8 --fee 0.0002 --universe user_data/lab/universe_perps_pre2022.txt --top 40
+.venv/bin/python user_data/lab/probe_carry.py --hold 30 --universe user_data/lab/universe_perps_pre2022.txt
 
 # 3. confirmação no Freqtrade (só se o passo 2 passar nos 4 períodos)
 freqtrade backtesting --config user_data/lab/config_lab.json --userdir user_data \
