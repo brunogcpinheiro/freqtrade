@@ -3,8 +3,9 @@
 Objetivo: usar o Freqtrade como **laboratório** para descobrir se existe uma estratégia com edge
 estatisticamente robusto, antes de colocar qualquer dinheiro real.
 
-**Estado atual: nenhuma estratégia aprovada.** Quatro experimentos rodaram; o quarto achou um
-sinal real, mas abaixo do custo. Todos reprovados com evidência (ver [Registro de experimentos](#registro-de-experimentos)). O que está
+**Estado atual: nenhuma estratégia aprovada.** Cinco experimentos rodaram; o quinto (long-short em
+futuros) é o primeiro com retorno líquido positivo em todos os anos — e ainda assim inoperável
+como está. Todos com evidência (ver [Registro de experimentos](#registro-de-experimentos)). O que está
 pronto e vale reaproveitar é o *método*, não o alfa.
 
 ## Ordem certa de trabalho
@@ -199,6 +200,51 @@ Três leituras:
 Lookbacks longos (30-60d) invertem em 2026 (t de −2,2 a −2,6 em `fwd`): o momentum de médio
 prazo virou reversão este ano. Instável demais para construir em cima.
 
+### Experimento 5 — Long-short em perpétuos (`probe_xsec.py --futures`) — ⚠️ SINAL REAL, INOPERÁVEL COMO ESTÁ
+
+Destrava o lado vendido do experimento 4. Dados de futuros USDT-M da Binance (candles 1d +
+funding a cada 8h, desde 2021-06). Rebalance diário, entra no open de t+1, sai no open de t+2.
+Taxa de futuros cobrada só nos nomes que **entram ou saem** de cada perna (turnover real, ≈77%
+por perna/dia), funding pago pela perna comprada e recebido pela vendida.
+
+**Com taxa maker (0,02% por lado), o spread de 1 dia (L=1, k=2) é líquido-positivo nos quatro
+períodos e nos cinco anos:**
+
+```
+                     train    valid    oos      fwd
+bruto                +0.14    +0.27    +0.15    +0.26     (pp/dia do notional de uma perna)
+taxa (maker)          0.06     0.06     0.06     0.06
+funding              +0.02    +0.00    +0.01    +0.01     (irrelevante)
+NET                  +0.06    +0.21    +0.08    +0.19
+
+por ano (maker):     2022 +2.9   2023 +42.6   2024 +76.7   2025 +28.9   2026 +46.2
+```
+
+Funding não importa (±0,02 pp/dia). L=3 e L=7 são negativos em `oos` — o efeito é de 1 dia.
+
+**Por que ainda não é operável**, na série diária agregada 2022→hoje:
+
+```
+fee/lado   média%/d  std%/d   t    sharpe  pior dia   maxDD    dias em DD   anos+
+0.020%       0.116    3.09   1.5   0.71    -30.6%    -64.6%      955        5/5
+0.035%       0.069    3.09   0.9   0.43    -30.6%    -73.1%     1613        4/5
+0.050%       0.023    3.09   0.3   0.14    -30.7%    -79.6%     1613        3/5
+```
+
+1. **Depende inteiramente de execução maker.** Com taxa taker o sharpe cai para 0,14. Com 77% de
+   turnover diário em 4 nomes, cada ordem limite não executada perde o sinal do dia. A
+   estratégia é uma aposta na qualidade dos fills, não no alfa.
+2. **Cauda gorda.** Pior dia −30,6% (2022-11-09, colapso da FTX), cinco dias piores que −10%,
+   drawdown máximo −64,6% do notional de uma perna, 955 dias (2,6 anos) abaixo do pico. Sharpe
+   0,71 e t pooled de 1,5 com cinco anos de dados.
+3. **Viés no lado vendido.** O universo são 10 moedas vivas em 2026. As que foram a zero e saíram
+   da exchange — exatamente as que uma perna vendida mais lucraria *ou* mais explodiria num
+   squeeze — não estão nos dados. O resultado do short está enviesado e não se sabe para que lado.
+
+A causa dos itens 1 e 2 é a mesma: **k=2 de 10 é um spread de 4 nomes.** Um deles explodir é o
+resultado do dia. Estratégias cross-sectional tiram o sharpe da diversificação — 20 nomes por
+perna, não 2 — e isso é a próxima coisa a testar, não um indicador novo.
+
 ## Problemas metodológicos a corrigir no próximo experimento
 
 - **Viés de sobrevivência**: a whitelist são 10 moedas escolhidas por terem sobrevivido até 2026.
@@ -219,15 +265,18 @@ A conclusão honesta do lab até aqui: **não existe edge de preço operável em
 taxa de 0,2% neste universo.** Isso não é fracasso do método — é o resultado que o método
 existe para produzir antes de dinheiro real entrar.
 
-O que ainda muda a equação, em ordem de custo:
+O experimento 5 mostrou que futuros destravam o sinal, mas que com 10 pares ele é um spread de
+4 nomes com cauda de −30% num dia. O que muda a equação agora:
 
-1. **Futuros em vez de spot.** Destrava o lado vendido do experimento 4 (o spread completo de
-   +0,15-0,27 pp/dia, não só o terço comprado), e abre o **funding rate** como prêmio estrutural.
-   `download-data --trading-mode futures` baixa candles e funding. Muda risco e complexidade de
-   forma real — é uma decisão sua, não do lab.
-2. **Custo menor.** Ordens maker com desconto BNB chegam a ~0,15 pp ida e volta; não fecha a
-   conta sozinho, mas muda o limiar de todos os probes.
-3. **FreqAI só depois** de um dos dois anteriores mostrar excesso positivo líquido.
+1. **Universo maior.** Top 40-60 perpétuos por volume, k=8-10 por perna. Se o efeito de 1 dia
+   é universal, a média se mantém e o desvio cai com a raiz do número de nomes — é de onde vem o
+   sharpe de qualquer estratégia cross-sectional. Testável em minutos com os mesmos probes.
+   Caveat: mesmo top-60 de hoje exclui as delistadas; o lado vendido continua enviesado.
+2. **Só se (1) der sharpe > 1,5 com maxDD < 30%:** estratégia Freqtrade em futuros
+   (`can_short=True`, `margin_mode=isolated`, ordens limite) e **dry-run para medir a taxa de
+   fill maker** — que é a variável de que o edge depende, e a única coisa que paper trading mede
+   melhor que backtest.
+3. **FreqAI** continua depois de tudo isso.
 
 ## Passo a passo
 
@@ -242,6 +291,7 @@ user_data/lab/01_download_data.sh
 # 2. triagem da premissa de entrada  <-- comece SEMPRE aqui
 .venv/bin/python user_data/lab/probe_entry.py            # time-series: "este par sobe?"
 .venv/bin/python user_data/lab/probe_xsec.py --tf 1d     # cross-sectional: "qual sobe mais?"
+.venv/bin/python user_data/lab/probe_xsec.py --futures --k 2 --fee 0.0002   # long-short em perpétuos
 
 # 3. confirmação no Freqtrade (só se o passo 2 passar nos 4 períodos)
 freqtrade backtesting --config user_data/lab/config_lab.json --userdir user_data \

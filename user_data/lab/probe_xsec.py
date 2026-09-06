@@ -16,10 +16,17 @@ Métricas por período:
 Rebalances não se sobrepõem (passo = H), então n é o número de apostas independentes.
 Spread e excesso são brutos (a taxa é igual nas duas pernas); `long` desconta FEE.
 
-Uso: python user_data/lab/probe_xsec.py [--tf 1d|4h] [--k 2]
+Modo --futures (só 1d): long-short de verdade em perpétuos USDT-M.
+  - taxa de futuros por perna (--fee, default 0.05% taker por lado), cobrada só nos nomes que
+    ENTRAM ou SAEM de cada perna a cada rebalance (turnover real, não 100%/dia)
+  - funding: a perna comprada paga a taxa, a vendida recebe (soma das 3 cobranças diárias)
+  - net = spread bruto - taxas - funding líquido
+
+Uso: python user_data/lab/probe_xsec.py [--tf 1d|4h] [--k 2] [--futures] [--fee 0.0005]
 """
 
 import argparse
+import pathlib
 
 import numpy as np
 import pandas as pd
@@ -38,6 +45,79 @@ MIN_PAIRS = 6  # SUI só existe desde 2023-05; ranqueia entre os que existem na 
 
 def panel(tf: str, col: str) -> pd.DataFrame:
     return pd.DataFrame({p: load(p, tf).set_index("date")[col] for p in PAIRS}).sort_index()
+
+
+FUT = pathlib.Path(__file__).resolve().parents[1] / "data" / "binance" / "futures"
+
+
+def fut_panel(tf: str, col: str) -> pd.DataFrame:
+    return pd.DataFrame(
+        {p: pd.read_feather(FUT / f"{p}_USDT_USDT-{tf}-futures.feather").set_index("date")[col] for p in PAIRS}
+    ).sort_index()
+
+
+def funding_daily() -> pd.DataFrame:
+    """Funding pago por dia (soma das cobranças de 8h). Positivo = long paga, short recebe."""
+    cols = {}
+    for p in PAIRS:
+        f = pd.read_feather(FUT / f"{p}_USDT_USDT-1h-funding_rate.feather").set_index("date")["funding_rate"]
+        cols[p] = f.resample("1D").sum()
+    return pd.DataFrame(cols).sort_index()
+
+
+def spread_series(k: int, fee_side: float, L: int, start: str, end: str) -> pd.DataFrame:
+    """Série diária do long-short em futuros: colunas gross, fee, fund, net (fração do
+    notional de uma perna). Rebalance diário; entra no open de t+1, sai no open de t+2."""
+    close = fut_panel("1d", "close")
+    opn = fut_panel("1d", "open")
+    past = close / close.shift(L) - 1
+    fwd = opn.shift(-2) / opn.shift(-1) - 1
+    # funding pago durante o dia t+1 (a posição é carregada de open t+1 a open t+2)
+    fund_next = funding_daily().reindex(past.index).shift(-1)
+    rows, prev_top, prev_bot = [], set(), set()
+    for t in past.index[(past.index >= start) & (past.index < end)]:
+        rp = past.loc[t].dropna()
+        rf = fwd.loc[t].reindex(rp.index).dropna()
+        rp = rp.reindex(rf.index)
+        if len(rp) < MIN_PAIRS:
+            continue
+        order = rp.sort_values().index
+        top, bot = set(order[-k:]), set(order[:k])
+        # cada nome trocado = 1 saída + 1 entrada; custo por perna = trocados/k * 2 * fee
+        changed = len(top ^ prev_top) / 2 + len(bot ^ prev_bot) / 2
+        fr = fund_next.loc[t].fillna(0)
+        rows.append({
+            "date": t,
+            "gross": rf[list(top)].mean() - rf[list(bot)].mean(),
+            "fee": changed / k * 2 * fee_side,
+            "fund": fr[list(top)].mean() - fr[list(bot)].mean(),
+        })
+        prev_top, prev_bot = top, bot
+    df = pd.DataFrame(rows).set_index("date")
+    df["net"] = df["gross"] - df["fee"] - df["fund"]
+    return df
+
+
+def run_futures(k: int, fee_side: float) -> None:
+    print(f"FUTUROS 1d long-short  |  k = {k}  |  taxa {fee_side:.3%} por lado  |  H = 1 dia")
+    hdr = f"  {'L':>3} " + "".join(f"{p:>42}" for p in PERIODS)
+    print(hdr)
+    for L in [1, 3, 7]:
+        cells = []
+        for period, (start, end) in PERIODS.items():
+            df = spread_series(k, fee_side, L, start, end)
+            if len(df) < 20:
+                cells.append(f"{'n<20':>42}")
+                continue
+            g, f_, fn, net = (df[c].to_numpy() for c in ["gross", "fee", "fund", "net"])
+            t_stat = net.mean() / net.std(ddof=1) * np.sqrt(len(net))
+            cells.append(
+                f"  n={len(net):>3} bruto={g.mean() * 100:>+5.2f} taxa={f_.mean() * 100:>5.2f} "
+                f"fund={fn.mean() * 100:>+5.2f} NET={net.mean() * 100:>+5.2f} t={t_stat:>+4.1f}"
+            )
+        print(f"  {L:>3} " + "".join(cells))
+    print()
+    print("Tudo em % do notional de UMA perna, por dia. fund>0 = a perna comprada pagou mais do que a vendida recebeu.")
 
 
 def run(tf: str, k: int) -> None:
@@ -86,5 +166,10 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--tf", default="1d", choices=list(GRID))
     ap.add_argument("--k", type=int, default=2)
+    ap.add_argument("--futures", action="store_true", help="long-short em perpétuos (só 1d)")
+    ap.add_argument("--fee", type=float, default=0.0005, help="taxa de futuros por lado")
     a = ap.parse_args()
-    run(a.tf, a.k)
+    if a.futures:
+        run_futures(a.k, a.fee)
+    else:
+        run(a.tf, a.k)
