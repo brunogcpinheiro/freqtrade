@@ -3,7 +3,7 @@
 Objetivo: usar o Freqtrade como **laboratório** para descobrir se existe uma estratégia com edge
 estatisticamente robusto, antes de colocar qualquer dinheiro real.
 
-**Estado atual: nenhuma estratégia aprovada.** Dois experimentos rodaram e os dois foram
+**Estado atual: nenhuma estratégia aprovada.** Três experimentos rodaram e os três foram
 reprovados com evidência (ver [Registro de experimentos](#registro-de-experimentos)). O que está
 pronto e vale reaproveitar é o *método*, não o alfa.
 
@@ -57,9 +57,14 @@ não os parâmetros.
 ### Como ler o `probe_entry.py`
 
 ```bash
-.venv/bin/python user_data/lab/probe_entry.py                 # saída por tempo fixo
-.venv/bin/python user_data/lab/probe_entry.py --mode revert   # saída por reversão, com stop
+.venv/bin/python user_data/lab/probe_entry.py                          # 30m, saída por tempo fixo
+.venv/bin/python user_data/lab/probe_entry.py --mode revert            # saída por reversão, com stop
+.venv/bin/python user_data/lab/probe_entry.py --tf 4h --horizons 3,6,12,24   # outro timeframe base
+.venv/bin/python user_data/lab/probe_entry.py --tf 1d --horizons 2,3,5,10
 ```
+
+`--tf` escolhe o timeframe base; o filtro de tendência vem sempre do timeframe acima
+(30m→4h, 4h→1d, 1d→1w). `--horizons` é em candles do `--tf`.
 
 - A linha `baseline` (todos os candles) dá **mediana −0,20% em todo período e horizonte** — que é
   exatamente a taxa de 0,2%. O harness se auto-valida, e qualquer célula da tabela se lê como
@@ -133,6 +138,31 @@ empata a média** (melhor caso, alvo SMA20: sem stop +0,28 no train → +0,20 co
 corta junto a reversão que se foi buscar. É a tensão fundamental do mean-reversion, e aqui ela
 não tem solução dentro desta premissa.
 
+### Experimento 3 — As mesmas premissas em 4h e 1d — ❌ REPROVADO
+
+Hipótese: os experimentos 1 e 2 morrem porque em 30m o edge bruto (0,1-0,3 pp) é da ordem da
+taxa (0,2 pp). Em timeframe maior o movimento alvo cresce e a taxa vira ruído. Rodadas as
+mesmas 13 premissas em 4h (filtro 1d) e 1d (filtro 1w), horizontes de 12h a 20 dias.
+
+**O edge não escala com o timeframe. O ruído escala.** Os números ficam maiores nas duas
+direções, mas não mais consistentes:
+
+- Em 4h, **nenhuma configuração** tem média positiva nos quatro períodos, nem com saída por
+  tempo nem por reversão. A única linha com média positiva em `oos` e `fwd` ao mesmo tempo
+  (3 quedas + RSI14<35 + tendência superior, alvo SMA20) é negativa em `train` e `valid`.
+- Em 1d a amostra colapsa: a maioria das premissas filtradas cai abaixo de 30 sinais por
+  período; o breakout e o z<−3,5 não têm amostra em período nenhum. Não dá para concluir nada,
+  e isso é a conclusão — 10 pares × 4 períodos não sustentam triagem diária.
+- O que aparece de "bom" em 4h/1d é beta de mercado, não sinal. O `baseline` em 4h a 192h dá
+  mediana **+1,40% em 2024 e −0,92/−1,29/−0,96% nos outros três** — o mercado subiu 137% em 2024
+  e caiu nos outros anos. Qualquer sinal long parece brilhante em 2024 e ruim no resto, e a
+  única leitura honesta é sinal *versus baseline do mesmo período*, onde nada sobra.
+- O stop segue não ajudando em 4h: 2% e 4% destroem o acerto (20-30%), 8% empata com "sem stop".
+
+Isso fecha a questão de escala de tempo: **o problema é a premissa, não o timeframe.** Nem
+breakout nem reversão à média em indicadores de preço, em nenhuma escala de 30m a 1d, mostram
+expectativa positiva estável fora da amostra neste universo.
+
 ## Problemas metodológicos a corrigir no próximo experimento
 
 - **Viés de sobrevivência**: a whitelist são 10 moedas escolhidas por terem sobrevivido até 2026.
@@ -145,15 +175,19 @@ não tem solução dentro desta premissa.
 
 ## O que a evidência sugere tentar em seguida
 
-As duas premissas direcionais óbvias em 30m estão descartadas, e as duas morrem pelo mesmo
-motivo: **o edge bruto é da ordem de 0,1-0,3 pp e a taxa é 0,2 pp**. Qualquer próxima tentativa
-precisa atacar essa razão, não procurar mais um indicador:
+Três experimentos fecham a família inteira de "indicador de preço em um par, long-only": breakout
+e reversão, de 30m a 1d, com e sem filtro de regime. Em nenhuma combinação existe expectativa
+positiva estável fora da amostra. Continuar nessa família é procurar o 14º indicador.
 
-1. **Menos trades, movimento maior.** Timeframe de 4h ou 1d, onde o movimento alvo é de vários
-   por cento e a taxa vira ruído. É a mudança de maior impacto e a mais barata de testar — o
-   `probe_entry.py` só precisa de outros feathers.
-2. **Prêmio estrutural em vez de direcional.** Funding rate em perpétuos, basis spot-futuro:
-   edge que não depende de prever direção e não compete com todo mundo no mesmo sinal técnico.
+O que resta são premissas de natureza diferente:
+
+1. **Prêmio estrutural em vez de direcional.** Funding rate em perpétuos, basis spot-futuro,
+   carry: edge que não depende de prever direção e não compete com todo mundo olhando o mesmo
+   RSI. Exige dados de futuros (o `download-data` do Freqtrade baixa funding com
+   `--trading-mode futures`).
+2. **Cross-sectional em vez de time-series.** Em vez de "este par vai subir?", "qual dos 10 vai
+   subir mais que os outros?" — força relativa, rotação. Neutraliza o beta de mercado que
+   domina as tabelas de 4h/1d, e é o que o experimento 3 mostrou ser o grande contaminante.
 3. **Só depois**: FreqAI. Um modelo em cima de features cujo edge bruto individual é negativo
    aprende ruído mais rápido, não menos.
 

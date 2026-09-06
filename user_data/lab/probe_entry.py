@@ -13,7 +13,7 @@ Regras de leitura:
     mesmo que "comprar em qualquer momento" não é um sinal.
   - Só interessa o que se mantém nos QUATRO períodos, principalmente oos e fwd.
 
-Uso: python user_data/lab/probe_entry.py [--horizons 6,12,24,48]
+Uso: python user_data/lab/probe_entry.py [--tf 30m|4h|1d] [--horizons 6,12,24,48]  (horizontes em candles)
 """
 
 import argparse
@@ -35,6 +35,10 @@ PERIODS = {
     "fwd": ("2026-01-01", "2027-01-01"),
 }
 FEE = 0.002  # ida e volta na Binance spot
+# timeframe base -> timeframe superior usado como filtro de tendência/regime
+INFORMATIVE = {"30m": "4h", "4h": "1d", "1d": "1w"}
+TF_HOURS = {"30m": 0.5, "4h": 4.0, "1d": 24.0}
+TF = "30m"  # sobrescrito por --tf
 
 
 def load(pair: str, tf: str) -> pd.DataFrame:
@@ -43,7 +47,7 @@ def load(pair: str, tf: str) -> pd.DataFrame:
 
 
 def btc_regime() -> pd.DataFrame:
-    df = load("BTC", "4h")
+    df = load("BTC", INFORMATIVE[TF])
     df["btc_ema50"] = ta.EMA(df, timeperiod=50)
     df["btc_ema200"] = ta.EMA(df, timeperiod=200)
     df["btc_adx"] = ta.ADX(df, timeperiod=14)
@@ -55,16 +59,20 @@ def btc_regime() -> pd.DataFrame:
 
 
 def build(pair: str, btc: pd.DataFrame) -> pd.DataFrame:
-    df = load(pair, "30m")
-    inf = load(pair, "4h")
+    df = load(pair, TF)
+    inf = load(pair, INFORMATIVE[TF])
     inf["ema20"] = ta.EMA(inf, timeperiod=20)
     inf["ema50"] = ta.EMA(inf, timeperiod=50)
     inf["ema200"] = ta.EMA(inf, timeperiod=200)
     inf["up"] = (inf["ema20"] > inf["ema50"]).astype(int)
     inf["above200"] = (inf["close"] > inf["ema200"]).astype(int)
-    # merge_informative_pair desloca o candle 4h em 1 -> sem lookahead.
-    df = merge_informative_pair(df, inf[["date", "up", "above200"]], "30m", "4h", ffill=True)
-    df = merge_informative_pair(df, btc, "30m", "4h", ffill=True)
+    # merge_informative_pair desloca o candle superior em 1 -> sem lookahead.
+    # Colunas viram up_inf / above200_inf / btc_bull_inf, seja qual for o timeframe.
+    inf_tf = INFORMATIVE[TF]
+    df = merge_informative_pair(df, inf[["date", "up", "above200"]], TF, inf_tf, ffill=True)
+    df = merge_informative_pair(df, btc, TF, inf_tf, ffill=True)
+    df = df.rename(columns={f"up_{inf_tf}": "up_inf", f"above200_{inf_tf}": "above200_inf",
+                            f"btc_bull_{inf_tf}": "btc_bull_inf"})
 
     df["sma20"] = ta.SMA(df, timeperiod=20)
     df["sma50"] = ta.SMA(df, timeperiod=50)
@@ -86,29 +94,29 @@ def build(pair: str, btc: pd.DataFrame) -> pd.DataFrame:
 
 
 # --------------------------------------------------------------- premissas testadas
-# up_4h / above200_4h / btc_bull_4h vêm do timeframe superior (já deslocados).
+# up_inf / above200_inf / btc_bull_inf vêm do timeframe superior (já deslocados).
 SIGNALS = {
     "baseline (todos os candles)": lambda d: pd.Series(True, index=d.index),
     # --- família mean-reversion, filtro de tendência crescente
     "MR rsi2<10": lambda d: d.rsi2 < 10,
     "MR rsi2<10 + close>sma200": lambda d: (d.rsi2 < 10) & (d.close > d.sma200),
     "MR rsi2<5  + close>sma200": lambda d: (d.rsi2 < 5) & (d.close > d.sma200),
-    "MR rsi2<10 + 4h up": lambda d: (d.rsi2 < 10) & (d.up_4h == 1),
-    "MR rsi2<10 + 4h>ema200": lambda d: (d.rsi2 < 10) & (d.above200_4h == 1),
-    "MR rsi2<10 + 4h>ema200 + btc": lambda d: (d.rsi2 < 10) & (d.above200_4h == 1) & (d.btc_bull_4h == 1),
+    "MR rsi2<10 + sup up": lambda d: (d.rsi2 < 10) & (d.up_inf == 1),
+    "MR rsi2<10 + sup>ema200": lambda d: (d.rsi2 < 10) & (d.above200_inf == 1),
+    "MR rsi2<10 + sup>ema200 + btc": lambda d: (d.rsi2 < 10) & (d.above200_inf == 1) & (d.btc_bull_inf == 1),
     # --- família z-score (distância da média em ATRs)
     "MR z<-1.5 + close>sma200": lambda d: (d.z < -1.5) & (d.close > d.sma200),
     "MR z<-2.5 + close>sma200": lambda d: (d.z < -2.5) & (d.close > d.sma200),
-    "MR z<-2.5 + 4h>ema200": lambda d: (d.z < -2.5) & (d.above200_4h == 1),
+    "MR z<-2.5 + sup>ema200": lambda d: (d.z < -2.5) & (d.above200_inf == 1),
     "MR z<-3.5": lambda d: d.z < -3.5,
     # --- bandas e sequência
     "MR close<BBlow + close>sma200": lambda d: (d.close < d.bb_low) & (d.close > d.sma200),
     "MR 3 quedas + close>sma200": lambda d: d.down3 & (d.close > d.sma200),
-    "MR 3 quedas + rsi14<35 + 4h up": lambda d: d.down3 & (d.rsi14 < 35) & (d.up_4h == 1),
+    "MR 3 quedas + rsi14<35 + sup up": lambda d: d.down3 & (d.rsi14 < 35) & (d.up_inf == 1),
     # --- controle: o breakout reprovado no round 1
     "BREAKOUT (round 1, controle)": lambda d: (
         (d.close > d.hh20) & (d.rsi14 > 50) & (d.rsi14 < 70)
-        & (d.volume > d.vol_sma * 1.2) & (d.up_4h == 1) & (d.btc_bull_4h == 1)
+        & (d.volume > d.vol_sma * 1.2) & (d.up_inf == 1) & (d.btc_bull_inf == 1)
     ),
 }
 
@@ -176,10 +184,14 @@ def revert_returns(
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--horizons", default="6,12,24,48")
+    ap.add_argument("--tf", default="30m", choices=list(INFORMATIVE))
+    ap.add_argument("--horizons", default="6,12,24,48", help="em candles do --tf")
     ap.add_argument("--mode", default="time", choices=["time", "revert"])
     args = ap.parse_args()
     horizons = [int(x) for x in args.horizons.split(",")]
+    global TF
+    TF = args.tf
+    print(f"TF base = {TF}  |  filtro superior = {INFORMATIVE[TF]}  |  taxa = {FEE:.1%}")
 
     btc = btc_regime()
     frames = {p: build(p, btc) for p in PAIRS}
@@ -198,7 +210,7 @@ def main() -> None:
                 rets = []
                 for df in frames.values():
                     sub = df[(df.date >= start) & (df.date < end)].reset_index(drop=True)
-                    if len(sub) < 300:
+                    if len(sub) < 30:  # período sem dados (ex.: SUI antes de 2023)
                         continue
                     m = fn(sub).fillna(False).to_numpy()
                     rets.append(fwd_returns(sub, m, h))
@@ -210,16 +222,18 @@ def main() -> None:
                 mean = r.mean() * 100
                 win = (r > 0).mean() * 100
                 cells.append(f"  n={len(r):>4} md={med:>+5.2f} mn={mean:>+5.2f} w={win:>4.1f}")
-            print(f"  {h * 0.5:>4.0f}h " + "".join(cells))
+            print(f"  {h * TF_HOURS[TF]:>4.0f}h " + "".join(cells))
     print()
     print("md = mediana %, mn = média %, w = % de acerto. Tudo líquido de 0.2% de taxa.")
 
 
+REVERT_HOLD = {"30m": 48, "4h": 12, "1d": 5}  # ~1 dia, 2 dias, 5 dias
+
 REVERT_SIGNALS = {
-    "MR z<-2.5 + 4h>ema200": SIGNALS["MR z<-2.5 + 4h>ema200"],
+    "MR z<-2.5 + sup>ema200": SIGNALS["MR z<-2.5 + sup>ema200"],
     "MR z<-1.5 + close>sma200": SIGNALS["MR z<-1.5 + close>sma200"],
-    "MR rsi2<10 + 4h>ema200": SIGNALS["MR rsi2<10 + 4h>ema200"],
-    "MR 3 quedas + rsi14<35 + 4h up": SIGNALS["MR 3 quedas + rsi14<35 + 4h up"],
+    "MR rsi2<10 + sup>ema200": SIGNALS["MR rsi2<10 + sup>ema200"],
+    "MR 3 quedas + rsi14<35 + sup up": SIGNALS["MR 3 quedas + rsi14<35 + sup up"],
     "BREAKOUT (controle)": SIGNALS["BREAKOUT (round 1, controle)"],
 }
 
@@ -233,13 +247,13 @@ def run_revert(frames: dict) -> None:
         print(f"  {'alvo':>10} {'stop':>5} " + "".join(f"{p:>23}" for p in PERIODS))
         for target in ["sma20", "pct:0.010", "pct:0.020"]:
           for stop in [0.0, 0.02, 0.04, 0.08]:
-            for max_hold in [48]:
+            for max_hold in [REVERT_HOLD[TF]]:
                 cells = []
                 for period, (start, end) in PERIODS.items():
                     rets = []
                     for df in frames.values():
                         sub = df[(df.date >= start) & (df.date < end)].reset_index(drop=True)
-                        if len(sub) < 300:
+                        if len(sub) < 30:  # período sem dados (ex.: SUI antes de 2023)
                             continue
                         m = fn(sub).fillna(False).to_numpy()
                         rets.append(revert_returns(sub, m, target, max_hold, stop))
