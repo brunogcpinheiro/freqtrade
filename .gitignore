@@ -129,3 +129,5 @@ docker-compose-*.yml
 !user_data/lab/
 !user_data/lab/config_lab.json
 user_data/strategies/*.json
+user_data/lab/secrets.local.json
+user_data/tradesv3.dryrun.*.sqlite*

@@ -10,17 +10,23 @@ Fator de funding cross-sectional em perpétuos USDT-M, market-neutral por notion
 Timing: candle 1d de data t fecha em t+1 00:00; as 3 cobranças de funding do dia t já são
 conhecidas nesse momento. O Freqtrade entra no open do candle seguinte — igual ao probe.
 
-ponytail: o funding vem do feather baixado pelo `download-data --trading-mode futures`.
-Serve para backtest/hyperopt. Para dry-run/live é preciso trocar `_load_funding` por uma
-chamada à exchange (fetch_funding_rate_history) — único trecho que muda.
+Fonte do funding: em backtest/hyperopt, o feather baixado pelo `download-data --trading-mode
+futures`; em dry-run/live, `fetch_funding_rate_history` da exchange (últimos 15 dias), com o
+ranking recalculado uma vez por dia UTC. Mesma soma diária, mesmo `map` por data nos dois modos.
 """
 
+import logging
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
 from pandas import DataFrame
 
+from freqtrade.enums import RunMode
 from freqtrade.strategy import IStrategy, IntParameter
+
+
+logger = logging.getLogger(__name__)
 
 
 class FundingFactor(IStrategy):
@@ -50,29 +56,60 @@ class FundingFactor(IStrategy):
 
     _rank: DataFrame | None = None  # data x par -> posição no ranking (1 = menor funding)
     _n: pd.Series | None = None  # data -> quantos pares tinham funding naquele dia
+    _rank_day: datetime | None = None  # dia UTC em que o ranking foi calculado (live)
 
     def leverage(self, pair: str, current_time, current_rate: float, proposed_leverage: float,
                  max_leverage: float, entry_tag: str | None, side: str, **kwargs) -> float:
         return 1.0
 
     # ------------------------------------------------------------------ ranking cross-pair
+    @property
+    def _live(self) -> bool:
+        return self.dp.runmode in (RunMode.LIVE, RunMode.DRY_RUN)
+
     def _load_funding(self, pairs: list[str]) -> DataFrame:
         """Funding pago por dia (soma das cobranças de 8h), uma coluna por par."""
-        datadir = Path(self.config["datadir"]) / "futures"
         cols = {}
-        for pair in pairs:
-            stem = pair.replace("/", "_").replace(":", "_")
-            files = sorted(datadir.glob(f"{stem}-*-funding_rate.feather"))
-            if not files:
-                continue
-            f = pd.read_feather(files[-1]).set_index("date")["funding_rate"]
-            cols[pair] = f.resample("1D").sum(min_count=1)
+        if self._live:
+            api = self.dp._exchange._api  # ccxt síncrono; 1 chamada por par, 1x por dia
+            cutoff = datetime.now(UTC) - timedelta(days=15)
+            for pair in pairs:
+                try:
+                    # sem `since`: a Binance devolve as N linhas MAIS RECENTES. Com `since` ela
+                    # devolve as mais antigas a partir dali, e pares com funding a cada 4h/1h
+                    # perdem os dias recentes -> NaN -> somem do ranking. 500 linhas cobrem
+                    # 15 dias mesmo com funding horário.
+                    rows = [r for r in api.fetch_funding_rate_history(pair, limit=500)
+                            if r["timestamp"] >= cutoff.timestamp() * 1000]
+                except Exception as e:  # par sem funding hoje não derruba o ranking dos outros
+                    logger.warning(f"funding indisponível para {pair}: {e}")
+                    continue
+                if not rows:
+                    continue
+                f = pd.Series(
+                    [r["fundingRate"] for r in rows],
+                    index=pd.to_datetime([r["timestamp"] for r in rows], unit="ms", utc=True),
+                )
+                cols[pair] = f.resample("1D").sum(min_count=1)
+        else:
+            datadir = Path(self.config["datadir"]) / "futures"
+            for pair in pairs:
+                stem = pair.replace("/", "_").replace(":", "_")
+                files = sorted(datadir.glob(f"{stem}-*-funding_rate.feather"))
+                if not files:
+                    continue
+                f = pd.read_feather(files[-1]).set_index("date")["funding_rate"]
+                cols[pair] = f.resample("1D").sum(min_count=1)
         return DataFrame(cols).sort_index()
 
     def _ensure_ranks(self) -> None:
-        if self._rank is not None:
+        today = datetime.now(UTC).date()
+        if self._rank is not None and (not self._live or self._rank_day == today):
             return
         fund = self._load_funding(self.dp.current_whitelist())
+        self._rank_day = today
+        if self._live:
+            logger.info(f"FundingFactor: ranking recalculado para {today} com {fund.shape[1]} pares")
         f7 = fund.rolling(self.fund_window, min_periods=5).mean()
         self._rank = f7.rank(axis=1, method="first")
         self._n = f7.notna().sum(axis=1)

@@ -5,8 +5,8 @@ estatisticamente robusto, antes de colocar qualquer dinheiro real.
 
 **Estado atual: uma estratégia passou triagem E confirmação no Freqtrade.** Sete experimentos de
 preço reprovados; o oitavo — funding como *posicionamento*, cross-sectional em perpétuos — é
-positivo nos 4 períodos no probe e no backtest do Freqtrade (`FundingFactor`). Próximo degrau:
-dry-run. Tudo com evidência (ver [Registro de experimentos](#registro-de-experimentos)). O que está
+positivo nos 4 períodos no probe e no backtest do Freqtrade (`FundingFactor`), e o dry-run já
+roda com seleção idêntica à do backtest. Fase atual: paper trading. Tudo com evidência (ver [Registro de experimentos](#registro-de-experimentos)). O que está
 pronto e vale reaproveitar é o *método*, não o alfa.
 
 ## Ordem certa de trabalho
@@ -39,6 +39,7 @@ entrada sem sinal só encontra parâmetros que fazem o treino brilhar e morrem e
 | `../strategies/TRM_RawEntry.py` | Mede o edge bruto de uma entrada dentro do Freqtrade: sem stop, sem parcial, sem trailing, saída só por tempo. Passo de confirmação do `probe_entry.py`. |
 | `../strategies/FundingFactor.py` | **Experimento 8 no Freqtrade.** Futuros, long-short por ranking de funding, 1d. |
 | `config_futures.json` | Config de futuros para a `FundingFactor`: Binance USDT-M, isolada, 1×, 20 posições de 100 USDT, top-40 do universo. |
+| `secrets.local.json` | **Não versionado.** Credenciais da WebUI (e chaves da exchange, quando houver); o `04_dryrun.sh` mescla via segundo `--config`. |
 | `../strategies/TrendRegimeMomentum.py` | **Experimento 1, reprovado.** Mantido como registro: regime BTC 4h + breakout 30m. |
 | `../hyperopts/RobustEdgeHyperOptLoss.py` | Loss de Hyperopt que premia Profit Factor e penaliza drawdown e poucos trades. |
 | `config_lab.json` | Config de **dry-run**: Binance spot, USDT, carteira 200, `max_open_trades=3`, 60 USDT por posição, 10 pares. |
@@ -377,8 +378,33 @@ fwd      2026-01-01..2026-09-05     633   52.6    12.04    8.46  1.12    1.61
   (`lookahead.py`, `prepare_data`), o que destrói qualquer ranking cross-pair. O teste correto —
   dois backtests completos terminando em 2025-07 e 2026-01 — dá **455 entradas idênticas** no
   período comum. Sem dependência do futuro.
-- **Para dry-run/live falta uma coisa**: `_load_funding` lê o feather do disco. Precisa vir da
-  exchange (`fetch_funding_rate_history`). É o único trecho que muda; está marcado no código.
+#### Dry-run (paper trading)
+
+```bash
+CONFIG=user_data/lab/config_futures.json STRATEGY=FundingFactor user_data/lab/04_dryrun.sh
+```
+
+Em dry-run/live, `_load_funding` busca `fetch_funding_rate_history` da exchange (500 linhas
+mais recentes, corta em 15 dias) e recalcula o ranking uma vez por dia UTC. Verificação feita
+em 2026-09-07: os 20 pares escolhidos pelo bot ao vivo são **exatamente** os que o rank do
+feather escolhe para o último candle fechado (10/10 long, 10/10 short).
+
+Bug encontrado e corrigido nessa verificação, que vale registrar: a primeira versão usava
+`since=15d, limit=100`. A Binance devolve as 100 linhas mais *antigas* a partir de `since`; para
+pares com funding a cada 4h (COTI: 6 cobranças/dia) os dias recentes ficavam de fora, o par
+virava NaN e sumia do ranking — 19/20 no primeiro teste. **Nenhum backtest pegaria isso.** É o
+tipo de coisa que o dry-run existe para pegar.
+
+O que o dry-run mede nas próximas semanas — e o que não mede:
+
+- **Mede**: fills das ordens limite nos nomes menos líquidos, funding real vs. histórico,
+  comportamento no rebalance diário, restart do bot. Compare periodicamente as posições
+  abertas com o rank do feather (script acima, `probe_xsec.py`), não o P&L.
+- **Não mede**: edge. 8 semanas ≈ 60 rebalances; o sharpe de 1,0-2,6 vem de 4 anos. Um mês
+  ruim não reprova e um mês bom não aprova.
+
+Antes de live, ainda: chaves da exchange em `secrets.local.json`, `dry_run: false`, e começar
+com capital que você aceita perder inteiro — o backtest tem viés de sobrevivência no universo.
 
 ## Conclusão do lab (2026-09)
 
