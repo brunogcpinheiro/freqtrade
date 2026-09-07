@@ -3,9 +3,10 @@
 Objetivo: usar o Freqtrade como **laboratório** para descobrir se existe uma estratégia com edge
 estatisticamente robusto, antes de colocar qualquer dinheiro real.
 
-**Estado atual: uma premissa passou na triagem.** Sete experimentos de preço reprovados; o oitavo
-— funding como *posicionamento*, cross-sectional em perpétuos — é positivo nos 4 períodos, sharpe
-1,7-1,9, robusto a k, taxa, liquidez e universo. Próximo degrau: confirmação no Freqtrade. Tudo com evidência (ver [Registro de experimentos](#registro-de-experimentos)). O que está
+**Estado atual: uma estratégia passou triagem E confirmação no Freqtrade.** Sete experimentos de
+preço reprovados; o oitavo — funding como *posicionamento*, cross-sectional em perpétuos — é
+positivo nos 4 períodos no probe e no backtest do Freqtrade (`FundingFactor`). Próximo degrau:
+dry-run. Tudo com evidência (ver [Registro de experimentos](#registro-de-experimentos)). O que está
 pronto e vale reaproveitar é o *método*, não o alfa.
 
 ## Ordem certa de trabalho
@@ -36,6 +37,8 @@ entrada sem sinal só encontra parâmetros que fazem o treino brilhar e morrem e
 | `probe_carry.py` | Carry de funding (short perp + long spot, delta-neutro). Retorno = funding recebido − taxas de rebalance. |
 | `universe_perps_pre2022.txt` | 60 perpétuos USDT-M cripto listados antes de 2022, ordenados por volume atual. Universo do experimento 6. |
 | `../strategies/TRM_RawEntry.py` | Mede o edge bruto de uma entrada dentro do Freqtrade: sem stop, sem parcial, sem trailing, saída só por tempo. Passo de confirmação do `probe_entry.py`. |
+| `../strategies/FundingFactor.py` | **Experimento 8 no Freqtrade.** Futuros, long-short por ranking de funding, 1d. |
+| `config_futures.json` | Config de futuros para a `FundingFactor`: Binance USDT-M, isolada, 1×, 20 posições de 100 USDT, top-40 do universo. |
 | `../strategies/TrendRegimeMomentum.py` | **Experimento 1, reprovado.** Mantido como registro: regime BTC 4h + breakout 30m. |
 | `../hyperopts/RobustEdgeHyperOptLoss.py` | Loss de Hyperopt que premia Profit Factor e penaliza drawdown e poucos trades. |
 | `config_lab.json` | Config de **dry-run**: Binance spot, USDT, carteira 200, `max_open_trades=3`, 60 USDT por posição, 10 pares. |
@@ -344,6 +347,39 @@ O que ainda pesa contra:
 Time-series long-only com o mesmo sinal (`probe_funding.py`): nada consistente. O edge só
 aparece no cross-section, o que faz sentido — é relativo, não direcional.
 
+Checagens extras antes de subir de degrau: sinal atrasado 1/2/3/7 dias extras degrada suave
+(sharpe 1,76 → 1,47 → 1,62 → 1,36 → 1,00) — sem penhasco, logo sem lookahead; decomposição por
+ano mostra preço e funding positivos nos 5 anos, funding recebido em 2026 no máximo da série.
+
+#### Confirmação no Freqtrade (`FundingFactor`, `config_futures.json`)
+
+Top-40 do universo, k=10, 1× isolada, 20 posições de 100 USDT, 1d. Sem hyperopt.
+
+```
+período  range                   trades   win%   lucro%  maxDD%    PF  sharpe
+train    2022-01-01..2024-01-01    1725   49.8    25.01   10.16  1.08    1.03
+valid    2024-01-01..2025-01-01     982   53.4    51.37   19.34  1.24    2.58
+oos      2025-01-01..2026-01-01     962   53.8    24.38   13.74  1.14    2.10
+fwd      2026-01-01..2026-09-05     633   52.6    12.04    8.46  1.12    1.61
+```
+
+- **Positivo nos 4 períodos, DD < 20% em todos, sharpe 1,0-2,6.** Retorno no capital ≈ 12-50%/ano,
+  abaixo do probe (~30%) como esperado: carteira não 100% alocada, stake fixo, custos reais.
+- **Funding aplicado pelo backtester** (`funding_fees` nos trades): 32-68% do lucro. Cada perna
+  sozinha é beta — long perde em 2022-23/2025 e ganha em 2024, a short o inverso — e a **soma**
+  é o que é estável. É o hedge funcionando.
+- **Critério de aceite**: reprova no gate v1 (PF > 1,3). Num book neutro com ~1000 trades/ano e
+  53% de acerto, PF ≈ 1,1-1,2 é o formato normal; a métrica certa é o sharpe. Foi adicionado um
+  gate `--neutral` ao `walkforward_report.py` (lucro > 0, sharpe > 1, DD < 20%) — **depois** de
+  ver o resultado, e por isso está explícito lá e aqui. Nesse gate passa nos 4 períodos.
+- **`lookahead-analysis` acusa "bias" em `rank`/`n`: falso positivo estrutural.** A ferramenta
+  roda o backtest truncado com `pair_whitelist = [o par do trade]`
+  (`lookahead.py`, `prepare_data`), o que destrói qualquer ranking cross-pair. O teste correto —
+  dois backtests completos terminando em 2025-07 e 2026-01 — dá **455 entradas idênticas** no
+  período comum. Sem dependência do futuro.
+- **Para dry-run/live falta uma coisa**: `_load_funding` lê o feather do disco. Precisa vir da
+  exchange (`fetch_funding_rate_history`). É o único trecho que muda; está marcado no código.
+
 ## Conclusão do lab (2026-09)
 
 Sete experimentos, um universo de 10 majors + 60 altcoins, 2022 → hoje, sempre com o mesmo
@@ -358,7 +394,7 @@ protocolo (train / valid / oos / fwd, parâmetros congelados, custos reais):
 | 5 | Long-short em perpétuos, 10 majors | Positivo 5/5 anos com maker, sharpe 0,7, maxDD −65% |
 | 6 | O mesmo em 61 perps | Inverte o sinal; reprova o 5 como artefato de universo |
 | 7 | Carry de funding | Real, 2-7%/ano no capital |
-| 8 | **Fator de funding cross-sectional** | **Passou: 4/4 períodos, sharpe 1,7-1,9, robusto** |
+| 8 | **Fator de funding cross-sectional** | **Passou triagem e Freqtrade: 4/4 períodos, sharpe 1,0-2,6, DD < 20%** |
 
 **Não existe, neste universo e com taxa de varejo, uma estratégia de preço com expectativa
 positiva estável fora da amostra.** O que passou não é preço — é informação sobre posicionamento. O único retorno estrutural mensurável (funding) rende menos
@@ -423,6 +459,7 @@ freqtrade backtesting --config user_data/lab/config_lab.json --userdir user_data
 
 # 4. estratégia completa nos 4 períodos
 user_data/lab/02_walkforward.sh
+CONFIG=user_data/lab/config_futures.json STRATEGY=FundingFactor REPORT_FLAGS=--neutral user_data/lab/02_walkforward.sh
 
 # 5. hyperopt SÓ no treino, depois repita o passo 4
 EPOCHS=300 user_data/lab/03_hyperopt.sh

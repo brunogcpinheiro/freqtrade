@@ -22,4 +22,4 @@ for period in "train:$TRAIN" "valid:$VALID" "oos:$OOS" "fwd:$FWD"; do
 done
 
 echo
-"${PYTHON:-python}" "$LAB_DIR/walkforward_report.py" --results "$USER_DATA/backtest_results/$TAG"
+"${PYTHON:-python}" "$LAB_DIR/walkforward_report.py" --results "$USER_DATA/backtest_results/$TAG" ${REPORT_FLAGS:-}

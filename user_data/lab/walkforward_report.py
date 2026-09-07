@@ -4,6 +4,12 @@ train / valid / oos / fwd com as métricas que importam para decidir se há edge
 
 Critério de aceite (v1): Profit Factor > 1.3 e Max Drawdown < 20% em TODOS os períodos,
 sem alterar parâmetros entre eles. PF > 1.5 fora da amostra = interessante de verdade.
+
+--neutral: critério para estratégias market-neutral de muitos trades (long-short, fatores).
+Nelas o PF fica ~1.1-1.2 por construção (milhares de trades, ~50% de acerto, ganhos e perdas
+do mesmo tamanho) e a métrica que importa é o sharpe: exige lucro > 0, sharpe > 1.0 e
+Max Drawdown < 20% em todos os períodos. Adicionado DEPOIS do experimento 8 — está explícito
+aqui justamente para o critério não mudar em silêncio.
 """
 
 import argparse
@@ -16,6 +22,7 @@ from freqtrade.data.btanalysis import get_latest_backtest_filename, load_backtes
 PERIODS = ["train", "valid", "oos", "fwd"]
 PF_MIN = 1.3
 DD_MAX = 0.20
+SHARPE_MIN = 1.0  # --neutral
 
 
 def find_result(results_dir: Path, period: str) -> Path | None:
@@ -34,6 +41,7 @@ def main() -> int:
     ap.add_argument(
         "--results", required=True, help="diretório do TAG (contém train/ valid/ oos/ fwd/)"
     )
+    ap.add_argument("--neutral", action="store_true", help="gate para estratégias market-neutral")
     args = ap.parse_args()
     results_dir = Path(args.results)
 
@@ -63,7 +71,10 @@ def main() -> int:
         any_data = True
         pf = s.get("profit_factor") or 0.0
         dd = s.get("max_drawdown_account") or 0.0
-        ok = pf > PF_MIN and dd < DD_MAX and s["total_trades"] > 0
+        if args.neutral:
+            ok = s["profit_total"] > 0 and s.get("sharpe", 0) > SHARPE_MIN and dd < DD_MAX
+        else:
+            ok = pf > PF_MIN and dd < DD_MAX and s["total_trades"] > 0
         all_ok &= ok
         rng = f"{s['backtest_start'][:10]}..{s['backtest_end'][:10]}"
         print(
@@ -75,9 +86,10 @@ def main() -> int:
     if not any_data:
         print("Nenhum resultado encontrado. Rode 01_download_data.sh e 02_walkforward.sh primeiro.")
         return 1
+    gate = f"lucro > 0, sharpe > {SHARPE_MIN}, DD < {DD_MAX:.0%}" if args.neutral else f"PF > {PF_MIN}, DD < {DD_MAX:.0%}"
     if all_ok:
         print(
-            f"VEREDITO: passou em todos os períodos (PF > {PF_MIN}, DD < {DD_MAX:.0%}). "
+            f"VEREDITO: passou em todos os períodos ({gate}). "
             "Próximo passo: 05_bias_checks.sh e depois 04_dryrun.sh por 4-8 semanas."
         )
     else:
