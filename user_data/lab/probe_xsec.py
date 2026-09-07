@@ -77,12 +77,18 @@ def funding_daily() -> pd.DataFrame:
     return pd.DataFrame(cols).sort_index()
 
 
+SIGNAL = "momentum"  # ou "funding": ranqueia por -funding médio 7d (long nos de funding mais baixo)
+
+
 def spread_series(k: int, fee_side: float, L: int, start: str, end: str) -> pd.DataFrame:
     """Série diária do long-short em futuros: colunas gross, fee, fund, net (fração do
     notional de uma perna). Rebalance diário; entra no open de t+1, sai no open de t+2."""
     close = fut_panel("1d", "close")
     opn = fut_panel("1d", "open")
     past = close / close.shift(L) - 1
+    if SIGNAL == "funding":
+        # funding conhecido até o dia t (inclusive); top-k = menor funding = crowded short
+        past = -funding_daily().reindex(past.index).reindex(columns=past.columns).rolling(7, min_periods=5).mean()
     fwd = opn.shift(-2) / opn.shift(-1) - 1
     # funding pago durante o dia t+1 (a posição é carregada de open t+1 a open t+2)
     fund_next = funding_daily().reindex(past.index).shift(-1).reindex(columns=past.columns)
@@ -187,10 +193,12 @@ if __name__ == "__main__":
     ap.add_argument("--fee", type=float, default=0.0005, help="taxa de futuros por lado")
     ap.add_argument("--universe", help="arquivo com um par por linha (BTC/USDT:USDT)")
     ap.add_argument("--top", type=int, help="N mais líquidos nos 30d anteriores, a cada rebalance")
+    ap.add_argument("--signal", default="momentum", choices=["momentum", "funding"])
     a = ap.parse_args()
     if a.universe:
         UNIVERSE = [ln.strip().split("/")[0] for ln in open(a.universe) if ln.strip()]
     TOP_N = a.top
+    SIGNAL = a.signal
     if a.futures:
         run_futures(a.k, a.fee)
     else:

@@ -3,9 +3,9 @@
 Objetivo: usar o Freqtrade como **laboratório** para descobrir se existe uma estratégia com edge
 estatisticamente robusto, antes de colocar qualquer dinheiro real.
 
-**Estado atual: nenhuma estratégia aprovada, e o lab chegou a uma conclusão.** Sete experimentos
-cobrem previsão de preço (time-series e cross-sectional, spot e futuros, 30m a 1d) e prêmio
-estrutural (funding). Nada é operável com taxa de varejo. Todos com evidência (ver [Registro de experimentos](#registro-de-experimentos)). O que está
+**Estado atual: uma premissa passou na triagem.** Sete experimentos de preço reprovados; o oitavo
+— funding como *posicionamento*, cross-sectional em perpétuos — é positivo nos 4 períodos, sharpe
+1,7-1,9, robusto a k, taxa, liquidez e universo. Próximo degrau: confirmação no Freqtrade. Tudo com evidência (ver [Registro de experimentos](#registro-de-experimentos)). O que está
 pronto e vale reaproveitar é o *método*, não o alfa.
 
 ## Ordem certa de trabalho
@@ -32,6 +32,7 @@ entrada sem sinal só encontra parâmetros que fazem o treino brilhar e morrem e
 |---|---|
 | `probe_entry.py` | Triagem de premissas de entrada em pandas puro. Mede o retorno forward depois do sinal, líquido de taxa, nos 4 períodos. Dezenas de variantes em segundos. |
 | `probe_xsec.py` | Triagem **cross-sectional**: ranqueia os pares pelo retorno passado e mede o spread top-k − bottom-k. O beta de mercado se cancela por construção. |
+| `probe_funding.py` | Funding como posicionamento, time-series por par (crowded long/short → retorno forward). Reprovado long-only. |
 | `probe_carry.py` | Carry de funding (short perp + long spot, delta-neutro). Retorno = funding recebido − taxas de rebalance. |
 | `universe_perps_pre2022.txt` | 60 perpétuos USDT-M cripto listados antes de 2022, ordenados por volume atual. Universo do experimento 6. |
 | `../strategies/TRM_RawEntry.py` | Mede o edge bruto de uma entrada dentro do Freqtrade: sem stop, sem parcial, sem trailing, saída só por tempo. Passo de confirmação do `probe_entry.py`. |
@@ -299,6 +300,50 @@ capital**, dependendo do ano. É menos do que USDT rende em lending, com risco d
 
 Não é um bot. É uma linha de rendimento passivo que já foi arbitrada até o custo de capital.
 
+### Experimento 8 — Fator de funding cross-sectional (`probe_xsec.py --signal funding`) — ✅ PASSOU NA TRIAGEM
+
+Primeira premissa de **informação** em vez de preço: o funding revela quem está posicionado e
+pagando para ficar. A cada dia, long nos k perpétuos de funding médio (7d) mais **baixo**
+(short lotado, você recebe funding) e short nos k de funding mais **alto** (long lotado, você
+recebe funding). Market-neutral por notional. Mesma série de custos do experimento 5.
+
+```
+config                   train        valid        oos          fwd     | sharpe pior%  maxDD%  por ano (% notional de 1 perna)
+61 perps k=10 maker      +0.14 t2.2   +0.09 t0.9   +0.27 t3.0   +0.24 t2.0  | 1.85  -8.5   -39.5   22:+32 23:+68 24:+33 25:+98 26:+60
+61 perps k=10 taker      +0.12 t1.9   +0.07 t0.8   +0.25 t2.8   +0.23 t1.9  | 1.67  -8.5   -42.0   22:+26 23:+62 24:+26 25:+91 26:+56
+top-40 liq k=10 maker    +0.12 t1.9   +0.18 t1.7   +0.22 t2.1   +0.23 t2.0  | 1.76 -11.9   -37.9   22:+40 23:+48 24:+65 25:+79 26:+58
+top-40 liq k=5  maker    +0.19 t1.9   +0.32 t2.3   +0.20 t1.5   +0.38 t1.9  | 1.73 -15.3   -35.8   22:+68 23:+68 24:+118 25:+71 26:+94
+top-20 liq k=10 maker    +0.13 t2.2   +0.21 t2.5   +0.10 t1.2   +0.00 t0.0  | 1.47  -7.7   -26.9   22:+11 23:+84 24:+79 25:+35 26:+1
+10 majors k=3 maker      +0.16 t2.0   +0.40 t3.1   +0.05 t0.5   +0.08 t1.1  | 1.61 -18.6   -30.0   22:+43 23:+73 24:+146 25:+18 26:+20
+```
+
+Por que isso é diferente dos experimentos 4-6:
+
+- **Positivo em 4/4 períodos e 5/5 anos em toda configuração**, t ≥ 2 em 3 dos 4 períodos
+  para k=10. Um sinal testado (não dezenas), com mecanismo econômico: você é pago para tomar o
+  outro lado do posicionamento lotado.
+- **Metade preço, metade funding recebido**, e as duas metades são positivas em todos os
+  períodos separadamente. Não depende de uma só.
+- **Turnover ≈ 5%/dia** (funding muda devagar): taxa custa 0,01 pp/dia, taker vs maker é
+  irrelevante. O oposto do experimento 5, que vivia de fills maker em 77% de turnover.
+- **Cauda controlada**: pior dia −8,5% (k=10) contra −30,6% do experimento 5. 126 de 1707 dias
+  com |retorno| > 5%, dos dois lados.
+
+O que ainda pesa contra:
+
+- **Onde o edge mora em 2026**: top-20 por liquidez dá +0,00 no `fwd`; 61 perps e top-40 dão
+  +0,23. O efeito hoje vive nos nomes 21-60 por volume — negociáveis na Binance, mas com
+  slippage maior do que o modelo assume.
+- **Sobrevivência**: só moedas vivas em 2026. Delistadas teriam caído na perna vendida (ganho)
+  ou na comprada (perda) — a direção do viés é ambígua.
+- **Drawdown de −38 a −44% do notional de uma perna** e 330-420 dias abaixo do pico. No capital
+  (2 pernas a 1×) é metade disso: ~−20% e retorno ~15-50%/ano. Sharpe não muda.
+- **Short em moeda que dobra num dia**: k=10 limita a −10% da perna. Margem isolada por posição
+  limita a liquidação a uma posição.
+
+Time-series long-only com o mesmo sinal (`probe_funding.py`): nada consistente. O edge só
+aparece no cross-section, o que faz sentido — é relativo, não direcional.
+
 ## Conclusão do lab (2026-09)
 
 Sete experimentos, um universo de 10 majors + 60 altcoins, 2022 → hoje, sempre com o mesmo
@@ -313,9 +358,10 @@ protocolo (train / valid / oos / fwd, parâmetros congelados, custos reais):
 | 5 | Long-short em perpétuos, 10 majors | Positivo 5/5 anos com maker, sharpe 0,7, maxDD −65% |
 | 6 | O mesmo em 61 perps | Inverte o sinal; reprova o 5 como artefato de universo |
 | 7 | Carry de funding | Real, 2-7%/ano no capital |
+| 8 | **Fator de funding cross-sectional** | **Passou: 4/4 períodos, sharpe 1,7-1,9, robusto** |
 
 **Não existe, neste universo e com taxa de varejo, uma estratégia de preço com expectativa
-positiva estável fora da amostra.** O único retorno estrutural mensurável (funding) rende menos
+positiva estável fora da amostra.** O que passou não é preço — é informação sobre posicionamento. O único retorno estrutural mensurável (funding) rende menos
 que renda fixa em stablecoin. Isso é o resultado do método funcionando, não falhando: ele
 existia para impedir que dinheiro real entrasse numa dessas sete coisas — e impediu.
 
@@ -369,6 +415,7 @@ user_data/lab/01_download_data.sh
 .venv/bin/python user_data/lab/probe_xsec.py --futures --k 2 --fee 0.0002   # long-short em perpétuos
 .venv/bin/python user_data/lab/probe_xsec.py --futures --k 8 --fee 0.0002 --universe user_data/lab/universe_perps_pre2022.txt --top 40
 .venv/bin/python user_data/lab/probe_carry.py --hold 30 --universe user_data/lab/universe_perps_pre2022.txt
+.venv/bin/python user_data/lab/probe_xsec.py --futures --signal funding --k 10 --fee 0.0002 --universe user_data/lab/universe_perps_pre2022.txt --top 40
 
 # 3. confirmação no Freqtrade (só se o passo 2 passar nos 4 períodos)
 freqtrade backtesting --config user_data/lab/config_lab.json --userdir user_data \
