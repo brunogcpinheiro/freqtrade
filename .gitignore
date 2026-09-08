@@ -122,3 +122,12 @@ target/
 !config_examples/config_freqai.example.json
 
 docker-compose-*.yml
+
+# Laboratório de estratégias (mantido no repositório)
+!user_data/strategies/
+!user_data/hyperopts/
+!user_data/lab/
+!user_data/lab/config_lab.json
+user_data/strategies/*.json
+user_data/lab/secrets.local.json
+user_data/tradesv3.dryrun.*.sqlite*
